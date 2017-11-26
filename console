@@ -1,0 +1,215 @@
+#!/usr/bin/php
+
+<?php
+
+class CSVGenerator
+{
+    
+    //Глобальная информация
+    private $information = array("-f" => "", "-t" => "", "-out" => "");
+    //Обработчик, из которого мы будем читать
+    private $from = 'file'; 
+    //допустимые типы
+    const TYPE_ALLOWED = array("json", "html");
+
+    const HTMLOPEN = '<html>
+    <head></head>
+    <body>
+    <table>
+    <tr>
+        <th>Name</th>
+        <th>Url</th>
+        <th>Stars</th>
+    </tr>';
+
+    const HTMLCLOSE ='</table></body></html>'; 
+        
+
+    public function __construct(array $arguments = array())
+    {
+        //скрытое очищение вывода
+        ob_implicit_flush();
+
+        if (count($arguments) < 2) {
+            $this->renderError("Something went wrong . Missing enought arguments");
+        } else if (count($arguments) == 2 && ($arguments[1] == "-h" || $arguments[1] == "-help")) {
+            echo "-f (The file which will be converted) \n";
+            echo "-t (The type which to  will be converted the file) \n";
+            echo "-out (The output file) \n";
+            exit;
+        } else if (count($arguments) == 2 ) {
+            $this->renderError("Something went wrong . Missing enought arguments");
+        }
+        
+        
+        for ($x = 1; $x < count($arguments); $x++) {
+            if (array_key_exists($arguments[$x], $this->information)) {
+                $this->information[$arguments[$x]] = $arguments[$x + 1];
+            }
+        }
+        
+        
+        if (!in_array($this->information["-t"], self::TYPE_ALLOWED)) {
+            $this->renderError("THE  FORMAT OF FILE IS NOT ALLOWED");
+        }
+
+        if(file_exists($this->information["-out"])) {
+            echo "The file ".$this->information["-out"]." already exists. Are you sure you want to rewrite ? \n  Type y/n to continue or abort the process  - ";
+            $stdin = fopen("php://stdin", 'r');
+            $line = fgets($stdin);
+            if(trim($line) != "y" && trim($line) != "yes" ) {
+                $this->renderError("THE PROCESS ABORTED!!");
+            }
+            fclose($stdin);
+            echo "\n";
+            echo "Continuing ... \n";
+        }
+
+        if(!file_exists($this->information["-f"])) {
+            $tcp_regexp = '(tcp:\/\/)(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5]):([0-9]{1,5})\b$';
+            preg_match($tcp_regexp, $this->information["-f"],$res);
+
+            if($res) {
+                $this->from = 'tcp';
+            } else {
+                $this->renderError("Can not read from handler!!!");
+            }
+        } else {
+            $components = explode(".",$this->information["-f"]);
+            if(end($components) != "csv") {
+                $this->renderError("The input file type is not a valid!!");
+            }
+
+        }
+
+
+        $this->run();
+    }
+
+    //запускаем программу
+    private function run() {
+
+       $regex = '/((http|https)\:\/\/)?[a-zA-Z0-9\.\/\?\:@\-_=#]+\.([a-zA-Z0-9\&\.\/\?\:@\-_=#])*/';
+       $row = 1;
+       $keys = [];
+
+
+        if ($this->from == "file") {
+            $handle = fopen($this->information["-f"], "r");
+        } else {
+            $handle = $this->TCPConnect();
+        }
+
+        if ($handle !== FALSE) {
+            $output = $this->makeOutPut();
+            $funcName = 'to'.strtoupper($this->information["-t"]);
+            $funcClose = 'close'.strtoupper($this->information["-t"]);
+            while (($data = fgetcsv($handle, 1000, ",")) !== FALSE) {
+                $status = false;
+                if($row == 1) {
+                    $keys["name"] = array_search("name", $data);
+                    $keys["url"] = array_search("url", $data);
+                    $keys["stars"] = array_search("stars", $data);
+                }
+                $url = $data[$keys["url"]];
+                $name = $data[$keys["name"]];
+                $stars = $data[$keys["stars"]];
+                preg_match($regex,$url,$valid_email);
+                if(mb_detect_encoding($name,'UTF-8') == "UTF-8"
+                 && $valid_email && intval($stars) >= 0 
+                 && intval($stars) <= 5) {
+                    $this->$funcName($output,["name" => $name,"url" => $url,"stars" => $stars],$row);
+                }
+                $row ++; 
+            }
+            $this->$funcClose($output);
+            fclose($handle);
+            fclose($output);
+            echo "\n Finished! \n";
+        }
+    }
+
+
+    
+    /**
+    *  пытаемся подключиться к tcp
+    * 
+    *   @return resource
+    */
+    private function TCPConnect() {
+
+        $components = parse_url($this->information["-f"]);
+
+        if (($sock = socket_create(AF_INET, SOCK_STREAM, SOL_TCP)) === false) {
+            $this->renderError("Socket Error : cause " . socket_strerror(socket_last_error($sock)) . "\n";
+        }
+
+        if (socket_bind($sock, $components["host"], $components["port"]) === false) {
+             $this->renderError("Socket Error : cause " . socket_strerror(socket_last_error($sock)) . "\n";
+        }
+
+        if (socket_listen($sock, 5) === false) {
+            $this->renderError("Socket Error : cause " . socket_strerror(socket_last_error($sock)) . "\n";
+        }
+
+        return socket_read($msgsock, 1000, PHP_NORMAL_READ);
+    }
+
+    //Открывает файл или создает новый
+    /**
+    *@return bool
+    */
+    private function makeOutPut() {
+        return fopen($this->information["-out"], 'w');
+    }
+
+    //Записывает содержимое json в файл
+    /**
+    *@return bool
+    */
+    private function toJSON($handle,$data,$i) {
+        return fwrite($handle, $i === 2?'['.json_encode($data):json_encode($data));
+    }
+    //Закрывает json файл
+    /**
+    *@return bool
+    */ 
+    private function closeJSON($handle) {
+        return fwrite($handle,']');
+    }
+    /**
+    * Записывает содержимое html в файл
+    *
+    *@return bool
+    */
+    private function toHTML($handle,$data,$i) {
+        $html = '<tr>';
+
+        foreach ($data as $key => $value) {
+            $html.='<td>'.$value.'</td>';
+        }
+
+        $html.='</tr>';
+
+        return fwrite($handle, $i===2?self::HTMLOPEN.$html:$html);
+        
+    }
+    
+    /**
+    * Закрывает  html теги в файле
+    *
+    *@return bool
+    */
+    private function closeHTML($handle) {
+        return fwrite($handle, self::HTMLCLOSE);
+    }
+    //Выдает ошибки
+    private function renderError($message) {
+        echo " \n \033[0;31m  ".$message. " \033[0m \n";
+        die();
+    }
+    
+    
+}
+
+$generator = new CSVGenerator($argv); 
